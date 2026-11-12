@@ -19,6 +19,12 @@ def post_json(url, headers, payload):
             return json.load(response)
     except urllib.error.HTTPError as exc:
         # Do not print response bodies: they may contain account or request data.
+        if exc.code == 401:
+            raise RuntimeError('Provider từ chối API key (HTTP 401); kiểm tra key trong .env.') from exc
+        if exc.code == 403:
+            raise RuntimeError('Provider từ chối quyền truy cập (HTTP 403); kiểm tra quyền dùng model.') from exc
+        if exc.code == 429:
+            raise RuntimeError('Provider giới hạn yêu cầu hoặc quota (HTTP 429); kiểm tra rate limit và billing.') from exc
         raise RuntimeError(f'Provider trả HTTP {exc.code}; kiểm tra model, key và quota.') from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f'Không kết nối được provider: {exc.reason}') from exc
