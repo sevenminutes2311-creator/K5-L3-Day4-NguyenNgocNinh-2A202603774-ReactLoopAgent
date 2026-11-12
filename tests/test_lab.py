@@ -1,13 +1,39 @@
 """Tests offline; FakeProvider là test double, không đánh giá năng lực model."""
 import json
+import os
 import sys
+import tempfile
+import urllib.error
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent import run_agent
 from status_tools import StatusTools
-from providers import Provider
+from providers import Provider, post_json
+from run import load_env_file
+
+
+class ProviderErrorTests(unittest.TestCase):
+    @patch('providers.urllib.request.urlopen', side_effect=urllib.error.HTTPError('url', 401, 'Unauthorized', {}, None))
+    def test_401_reports_authentication_failure(self, _urlopen):
+        with self.assertRaisesRegex(RuntimeError, 'từ chối API key'):
+            post_json('https://example.test', {}, {})
+
+
+class EnvFileTests(unittest.TestCase):
+    def test_loads_supported_assignments_without_overriding_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / '.env'
+            path.write_text(
+                '$env:MODEL=file-model\nexport PROVIDER=openai\nAPI_KEY="value=with=equals"\n',
+                encoding='utf-8',
+            )
+            with patch.dict(os.environ, {'MODEL': 'process-model'}, clear=True):
+                load_env_file(str(path))
+                self.assertEqual(os.environ['MODEL'], 'process-model')
+                self.assertEqual(os.environ['PROVIDER'], 'openai')
+                self.assertEqual(os.environ['API_KEY'], 'value=with=equals')
 
 
 def tool_call(call_id, name, arguments):
@@ -61,7 +87,24 @@ class LoopTests(unittest.TestCase):
         fake = FakeProvider([tool_call('call-2', 'get_status', '{'), final()])
         result = run_agent('kiểm tra', fake, StatusTools())
         self.assertEqual(result['status'], 'completed')
-        self.assertEqual(json.loads(fake.histories[1][-1]['content'])['error'], 'INVALID_ARGUMENTS')
+        self.assertEqual(json.loads(fake.histories[1][-2]['content'])['error'], 'INVALID_ARGUMENTS')
+        self.assertIn('không thành công', fake.histories[1][-1]['content'])
+    def test_tool_failure_is_explicitly_not_evidence_of_operational_status(self):
+        class FailingTools:
+            def execute(self, name, args):
+                return {'ok': False, 'error': 'TimeoutError'}
+
+        fake = FakeProvider([
+            tool_call('timeout', 'get_status', '{"provider":"cloudflare"}'),
+            final('Cloudflare timeout nên chưa xác minh được trạng thái.'),
+        ])
+        result = run_agent('Kiểm tra Cloudflare.', fake, FailingTools())
+        self.assertEqual(result['status'], 'completed')
+        history = fake.histories[1]
+        self.assertEqual(history[-2]['role'], 'tool')
+        self.assertEqual(json.loads(history[-2]['content'])['error'], 'TimeoutError')
+        self.assertEqual(history[-1]['role'], 'user')
+        self.assertIn('không phải bằng chứng dịch vụ đang operational', history[-1]['content'])
     def test_max_steps(self):
         fake = FakeProvider([tool_call('a', 'get_status', '{"provider":"github"}')])
         self.assertEqual(run_agent('x', fake, StatusTools(), 1)['status'], 'max_steps')
